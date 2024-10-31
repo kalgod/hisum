@@ -7,6 +7,7 @@ from model.configs import Config, str2bool
 from torch.utils.data import DataLoader
 from model.mrhisum_dataset import MrHiSumDataset, BatchCollator
 from model.solver import Solver
+from scipy.stats import pearsonr, spearmanr
 
 if __name__ == '__main__':
 
@@ -59,6 +60,11 @@ if __name__ == '__main__':
                 plt.plot(seconds, score, label=f"{config.model}:loss{loss:.4f}", color='blue', linestyle='--')
                 # plt.plot(seconds, score2, label=f"VASNet:loss{loss2:.4f}", color='red', linestyle='--')
                 # plt.plot(seconds, score3, label=f"SL_module:loss{loss3:.4f}", color='gray', linestyle='--')
+                plcc, plcc_p_value = pearsonr(score, gtscore)
+                srcc, srcc_p_value = spearmanr(score, gtscore)
+                # plcc_idx, plcc_idx_p_value = pearsonr(idx_final_scores, idx_gt_scores)
+                # srcc_idx, srcc_idx_p_value = spearmanr(idx_final_scores, idx_gt_scores)
+                print(f"{name}: (PLCC): {plcc}, p-value: {plcc_p_value}, (SRCC): {srcc}, p-value: {srcc_p_value}")
 
                 plt.title(f'{name}: Score Comparison')
                 plt.xlabel('Second')

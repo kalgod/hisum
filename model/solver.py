@@ -16,6 +16,24 @@ from model.utils.evaluation_metrics import evaluate_summary
 from model.utils.generate_summary import generate_summary
 from model.utils.evaluate_map import generate_mrhisum_seg_scores, top50_summary, top15_summary
 
+def calculate_plcc(y_true, y_pred):
+    all_plcc=[]
+    a=y_pred
+    b=y_true
+    """计算 Pearson 相关系数"""
+    a_mean = torch.mean(a)
+    b_mean = torch.mean(b)
+
+    # 计算协方差
+    covariance = torch.mean((a - a_mean) * (b - b_mean))
+    
+    # 计算标准差
+    std_true = torch.std(a)
+    std_pred = torch.std(b)
+    
+    # 计算 PLCC
+    plcc = covariance / (std_true * std_pred+1e-9)
+    return plcc
 
 class Solver(object):
     def __init__(self, config=None, train_loader=None, val_loader=None, test_loader=None):
@@ -91,10 +109,13 @@ class Solver(object):
 
                 score, weights = self.model(frame_features, mask)
                 loss = self.criterion(score[mask], gtscore[mask])
-                # print(gtscore.shape,gtscore[mask].shape,loss.shape)
+                # print(gtscore.shape,gtscore[mask].shape)
                 loss=torch.mean(loss)
                 # print(score[0,:5], gtscore[0,:5], loss.item())
+                loss2=1-calculate_plcc(score[mask], gtscore[mask])
+                loss=loss+loss2
 
+                print(f"Loss: {loss.item()} | PLCC: {(1-loss2).item()}")
                 loss.backward()
                 loss_history.append(loss.item())
                 
@@ -203,7 +224,7 @@ class Solver(object):
             gtscore = gtscore.squeeze(0).cpu()
             loss = self.criterion(score, gtscore)
             loss=torch.sqrt(torch.mean(loss))
-            print(score[:5], gtscore[:5], loss.item())
+            # print(score[:5], gtscore[:5], loss.item())
             score_history.append((name, gtscore.numpy(), score.numpy(), loss.item()))
 
         final_f_score = np.mean(fscore_history)

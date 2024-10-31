@@ -1,5 +1,6 @@
 dataset/yt8m/frame/*
 dataset/mr_hisum.h5
+dataset/gtscore.csv
 dataset/PGL_SUM/*
 dataset/SL_module/*
 dataset/VASNet/*
