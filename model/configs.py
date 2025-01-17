@@ -53,6 +53,9 @@ class Config(object):
         self.best_map15_save_dir = os.path.join(self.save_dir_root, 'best_mAP15_model')
         os.makedirs(self.best_map15_save_dir, exist_ok = True)
 
+        self.best_plcc_save_dir = os.path.join(self.save_dir_root, 'best_PLCC_model')
+        os.makedirs(self.best_plcc_save_dir, exist_ok = True)
+
         log_dir = os.path.join(self.save_dir_root, 'logs')
         os.makedirs(log_dir, exist_ok = True)
 

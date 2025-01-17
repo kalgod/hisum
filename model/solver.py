@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import os
+import sys
 from tqdm import tqdm
 from sklearn.metrics import average_precision_score
 
@@ -11,6 +12,17 @@ from networks.mlp import SimpleMLP
 from networks.pgl_sum.pgl_sum import PGL_SUM
 from networks.vasnet.vasnet import VASNet
 from networks.sl_module.sl_module import SL_module
+#添加os的environment路径./detr
+sys.path.append("/home/cjh/work/hisum/networks/detr")
+from qd_detr.model import build_transformer, build_position_encoding, QDDETR
+from run_on_video.data_utils import ClipFeatureExtractor
+from utils.tensor_utils import pad_sequences_1d
+
+sys.path.append("/home/cjh/work/hisum/networks/uvcom")
+from uvcom.matcher import build_matcher
+from uvcom.CIM import build_CIM
+from uvcom.config import TestOptions
+from uvcom.model import UVCOM
 
 from model.utils.evaluation_metrics import evaluate_summary
 from model.utils.generate_summary import generate_summary
@@ -74,8 +86,71 @@ class Solver(object):
         elif self.config.model == 'SL_module':
             self.model = SL_module(input_dim=1024, depth=5, heads=8, mlp_dim=3072, dropout_ratio=0.5)
             self.model.to(self.config.device)
-            self.optimizer = optim.SGD(self.model.parameters(), lr=self.config.lr, momentum=0.9, weight_decay=self.config.l2_reg)
+            # self.optimizer = optim.SGD(self.model.parameters(), lr=self.config.lr, momentum=0.9, weight_decay=self.config.l2_reg)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=self.config.lr, weight_decay=self.config.l2_reg)
             self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=100, gamma=0.1)
+
+        elif self.config.model == 'DETR':
+            from qd_detr.model import build_position_encoding
+            ckpt_path="./networks/detr/run_on_video/qd_detr_ckpt/model_best.ckpt"
+            ckpt = torch.load(ckpt_path, map_location="cpu",weights_only=False)
+            args = ckpt["opt"]
+            transformer = build_transformer(args)
+            position_embedding, txt_position_embedding = build_position_encoding(args)
+            args.v_feat_dim = 1024
+            model = QDDETR(
+                transformer,
+                position_embedding,
+                txt_position_embedding,
+                txt_dim=args.t_feat_dim,
+                vid_dim=args.v_feat_dim,
+                num_queries=args.num_queries,
+                input_dropout=args.input_dropout,
+                aux_loss=args.aux_loss,
+                contrastive_align_loss=args.contrastive_align_loss,
+                contrastive_hdim=args.contrastive_hdim,
+                span_loss_type=args.span_loss_type,
+                use_txt_pos=args.use_txt_pos,
+                n_input_proj=args.n_input_proj,
+            )
+            self.feature_extractor = ClipFeatureExtractor()
+            self.model = model
+            self.model.to(self.config.device)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=self.config.lr, weight_decay=self.config.l2_reg)
+
+        elif self.config.model == 'uvcom':
+            from uvcom.position_encoding import build_position_encoding
+            ckpt_path="./networks/detr/run_on_video/qd_detr_ckpt/model_best.ckpt"
+            ckpt = torch.load(ckpt_path, map_location="cpu",weights_only=False)
+            args = ckpt["opt"]
+            # args.em_iter=5
+            # args.n_txt_mu=5
+            # args.n_visual_mu=30
+            # args.cross_fusion=False
+            args=TestOptions().parse()
+            # print(args)
+            position_embedding, txt_position_embedding = build_position_encoding(args)
+            args.v_feat_dim = 1024
+            args.t_feat_dim = 512
+            CIM = build_CIM(args)
+            model = UVCOM(
+                CIM,
+                position_embedding,
+                txt_position_embedding,
+                txt_dim=args.t_feat_dim,
+                vid_dim=args.v_feat_dim,
+                num_queries=args.num_queries,
+                input_dropout=args.input_dropout,
+                aux_loss=args.aux_loss,
+                span_loss_type=args.span_loss_type,
+                use_txt_pos=args.use_txt_pos,
+                n_input_proj=args.n_input_proj,
+                neg_choose_epoch=args.neg_choose_epoch
+            )
+            self.feature_extractor = ClipFeatureExtractor()
+            self.model = model
+            self.model.to(self.config.device)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=self.config.lr, weight_decay=self.config.l2_reg)
 
         else:
             print("Wrong model")
@@ -88,6 +163,7 @@ class Solver(object):
         best_f1score_epoch = 0
         best_map50_epoch = 0
         best_map15_epoch = 0
+        best_plcc=-1.0
         
         for epoch_i in range(self.config.epochs):
             print("[Epoch: {0:6}]".format(str(epoch_i)+"/"+str(self.config.epochs)))
@@ -105,9 +181,24 @@ class Solver(object):
                 frame_features = data['features'].to(self.config.device)
                 gtscore = data['gtscore'].to(self.config.device)
                 mask = data['mask'].to(self.config.device)
-                # print(data['video_name'],frame_features.shape, gtscore.shape,frame_features, mask.shape,gtscore,mask)
+                # print(frame_features.shape, gtscore.shape, mask.shape)
 
-                score, weights = self.model(frame_features, mask)
+                if self.config.model in ['DETR','uvcom']:
+                    query_list=[""]*frame_features.shape[0]
+                    query_feats = self.feature_extractor.encode_text(query_list)  # #text * (L, d)
+                    query_feats, query_mask = pad_sequences_1d(query_feats, dtype=torch.float32, device=self.config.device, fixed_length=None)
+                    model_inputs = dict(
+                        src_vid=frame_features,
+                        src_vid_mask=mask,
+                        src_txt=query_feats,
+                        src_txt_mask=query_mask
+                    )
+                    # decode outputs
+                    outputs = self.model(**model_inputs)
+                    score=outputs["saliency_scores"]
+                    # print(score.shape,score,gtscore)
+                else: 
+                    score, weights = self.model(frame_features, mask)
                 loss = self.criterion(score[mask], gtscore[mask])
                 # print(gtscore.shape,gtscore[mask].shape)
                 loss=torch.mean(loss)
@@ -123,7 +214,8 @@ class Solver(object):
 
             loss = np.mean(np.array(loss_history))
             
-            val_f1score, val_map50, val_map15,score_history = self.evaluate(dataloader=self.val_loader)
+            val_f1score, val_map50, val_map15,score_history,plcc = self.evaluate(dataloader=self.val_loader)
+            print("Avg PLCC",plcc)
             
             if best_f1score <= val_f1score:
                 best_f1score = val_f1score
@@ -142,6 +234,12 @@ class Solver(object):
                 best_map15_epoch = epoch_i
                 map15_save_ckpt_path = os.path.join(self.config.best_map15_save_dir, f'best_map15.pkl')
                 torch.save(self.model.state_dict(), map15_save_ckpt_path)
+
+            if best_plcc<=plcc:
+                best_plcc=plcc
+                best_plcc_epoch=epoch_i
+                plcc_save_ckpt_path = os.path.join(self.config.best_plcc_save_dir, f'best_plcc.pkl')
+                torch.save(self.model.state_dict(), plcc_save_ckpt_path)
             
             print("   [Epoch {0}] Train loss: {1:.05f}".format(epoch_i, loss))
             print('    VAL  F-score {0:0.5} | MAP50 {1:0.5} | MAP15 {2:0.5}'.format(val_f1score, val_map50, val_map15))
@@ -149,11 +247,13 @@ class Solver(object):
         print('   Best Val F1 score {0:0.5} @ epoch{1}'.format(best_f1score, best_f1score_epoch))
         print('   Best Val MAP-50   {0:0.5} @ epoch{1}'.format(best_map50, best_map50_epoch))
         print('   Best Val MAP-15   {0:0.5} @ epoch{1}'.format(best_map15, best_map15_epoch))
+        print('   Best Val PLCC   {0:0.5} @ epoch{1}\n'.format(best_plcc, best_plcc_epoch))
 
         f = open(os.path.join(self.config.save_dir_root, 'results.txt'), 'a')
         f.write('   Best Val F1 score {0:0.5} @ epoch{1}\n'.format(best_f1score, best_f1score_epoch))
         f.write('   Best Val MAP-50   {0:0.5} @ epoch{1}\n'.format(best_map50, best_map50_epoch))
         f.write('   Best Val MAP-15   {0:0.5} @ epoch{1}\n\n'.format(best_map15, best_map15_epoch))
+        f.write('   Best Val PLCC   {0:0.5} @ epoch{1}\n\n'.format(best_plcc, best_plcc_epoch))
         f.flush()
         f.close()
 
@@ -185,11 +285,29 @@ class Solver(object):
 
             B = frame_features.shape[0]
             mask=None
+            mask=torch.ones(frame_features.shape[0],frame_features.shape[1]).to(self.config.device)
             if 'mask' in data:
                 mask = data['mask'].to(self.config.device)
 
             with torch.no_grad():
-                score, attn_weights = self.model(frame_features, mask=mask)
+                if self.config.model in ['DETR','uvcom']:
+                    query_list=[""]*frame_features.shape[0]
+                    query_feats = self.feature_extractor.encode_text(query_list)  # #text * (L, d)
+                    query_feats, query_mask = pad_sequences_1d(query_feats, dtype=torch.float32, device=self.config.device, fixed_length=None)
+                    model_inputs = dict(
+                        src_vid=frame_features,
+                        src_vid_mask=mask,
+                        src_txt=query_feats,
+                        src_txt_mask=query_mask
+                    )
+                    # print(data,model_inputs)
+                    # decode outputs
+                    outputs = self.model(**model_inputs)
+                    score=outputs["saliency_scores"]
+                    # print(score.shape,score,gtscore)
+                else: 
+                    score, weights = self.model(frame_features, mask)
+                # score, attn_weights = self.model(frame_features, mask=mask)
 
             # Summarization metric
             score = score.squeeze().cpu()
@@ -223,15 +341,16 @@ class Solver(object):
             score = score.squeeze().cpu()
             gtscore = gtscore.squeeze(0).cpu()
             loss = self.criterion(score, gtscore)
-            loss=torch.sqrt(torch.mean(loss))
-            # print(score[:5], gtscore[:5], loss.item())
+            loss=calculate_plcc(score, gtscore)
+            # print("PLCC",loss.item())
             score_history.append((name, gtscore.numpy(), score.numpy(), loss.item()))
 
         final_f_score = np.mean(fscore_history)
         final_map50 = np.mean(map50_history)
         final_map15 = np.mean(map15_history)
+        final_plcc=np.mean([x[3] for x in score_history])
 
-        return final_f_score, final_map50, final_map15,score_history
+        return final_f_score, final_map50, final_map15,score_history,final_plcc
 
     def test(self, ckpt_path):
         if ckpt_path != None:
@@ -239,7 +358,7 @@ class Solver(object):
             print("Device: ",  self.config.device)
             self.model.load_state_dict(torch.load(ckpt_path))
         
-        test_fscore, test_map50, test_map15,score_history = self.evaluate(dataloader=self.test_loader)
+        test_fscore, test_map50, test_map15,score_history,final_plcc = self.evaluate(dataloader=self.test_loader)
 
         print("------------------------------------------------------")
         print(f"   TEST RESULT on {ckpt_path}: ")

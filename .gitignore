@@ -4,3 +4,4 @@ dataset/gtscore.csv
 dataset/PGL_SUM/*
 dataset/SL_module/*
 dataset/VASNet/*
+networks/detr/results/*
